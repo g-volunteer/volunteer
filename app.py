@@ -67,7 +67,8 @@ if menu == "봉사활동 신청 (직원용)":
     if activities_df.empty:
         st.info("현재 모집 중인 봉사활동 일감이 없습니다.")
     else:
-        # 활동 카드 형태로 표시
+        # 활동 카드 형태로 표시 및 선택 옵션 생성
+        act_options = {}
         for _, act in activities_df.iterrows():
             act_id = act['id']
             # 신청자 수 집계
@@ -75,6 +76,7 @@ if menu == "봉사활동 신청 (직원용)":
             c.execute("SELECT COUNT(*) FROM applications WHERE activity_id = ?", (act_id,))
             current_count = c.fetchone()[0]
             max_cap = act['max_capacity']
+            remain = max_cap - current_count
             is_full = current_count >= max_cap
 
             with st.container(border=True):
@@ -88,13 +90,13 @@ if menu == "봉사활동 신청 (직원용)":
                     if is_full:
                         st.error("정원 마감")
 
+            # 드롭다운 옵션 라벨
+            label = f"[{act['date']}] {act['title']} (잔여 {remain}명)"
+            act_options[label] = act_id
+
         st.divider()
         st.subheader("📋 참가 신청서 작성")
 
-        # 신청 폼
-        act_options = {f"[{act['date']}] {act['title']} (잔여 {act['max_capacity'] - pd.read_sql_query(f'SELECT COUNT(*) as c FROM applications WHERE activity_id = {act[\"id\"]}', conn).iloc[0]['c']}명)": act['id'] 
-                       for _, act in activities_df.iterrows()}
-        
         with st.form("apply_form", clear_on_submit=True):
             selected_act_label = st.selectbox("신청할 봉사활동 선택", list(act_options.keys()))
             
@@ -176,7 +178,7 @@ elif menu == "관리자 모드":
     st.title("🛠️ 관리자 대시보드")
     admin_password = st.sidebar.text_input("관리자 비밀번호", type="password")
     
-    # 기본 임시 비밀번호 설정 (운영 시 변경 필요)
+    # 관리자 기본 비밀번호
     if admin_password != "admin1234":
         st.warning("사이드바에 올바른 관리자 비밀번호를 입력해주세요.")
     else:
