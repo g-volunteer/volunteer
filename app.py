@@ -3,6 +3,7 @@ import pandas as pd
 import sqlite3
 from datetime import datetime
 import io
+import re
 
 # --- 1. 기본 설정 및 DB 초기화 ---
 st.set_page_config(
@@ -38,8 +39,8 @@ def init_db():
         CREATE TABLE IF NOT EXISTS applications (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             activity_id INTEGER,
-            emp_id TEXT NOT NULL,
             name TEXT NOT NULL,
+            birthdate TEXT NOT NULL,
             dept TEXT NOT NULL,
             phone TEXT NOT NULL,
             v1365_id TEXT,
@@ -51,6 +52,23 @@ def init_db():
     conn.close()
 
 init_db()
+
+# --- 생년월일 YYYY-MM-DD 변환/검증 함수 ---
+def format_birthdate(birth_str):
+    if not birth_str:
+        return ""
+    digits = re.sub(r'[^0-9]', '', str(birth_str))
+    
+    # 8자리 숫자인 경우 YYYY-MM-DD 변환
+    if len(digits) == 8:
+        return f"{digits[:4]}-{digits[4:6]}-{digits[6:]}"
+    # 6자리 숫자인 경우 (YYMMDD -> YYYY-MM-DD)
+    elif len(digits) == 6:
+        yy = int(digits[:2])
+        prefix = "19" if yy > 25 else "20"
+        return f"{prefix}{digits[:2]}-{digits[2:4]}-{digits[4:]}"
+    
+    return birth_str.strip()
 
 # --- 2. 사이드바 메뉴 구성 ---
 st.sidebar.title("🤝 봉사활동 포털")
@@ -99,11 +117,11 @@ if menu == "봉사활동 신청 (직원용)":
             
             c1, c2 = st.columns(2)
             with c1:
-                dept = st.text_input("소속 부서", placeholder="예: 기획홍보팀")
-                emp_id = st.text_input("사번", placeholder="예: 20240101")
+                name = st.text_input("성명 *", placeholder="예: 홍길동")
+                birthdate = st.text_input("생년월일 (YYYY-MM-DD) *", placeholder="예: 1980-06-02")
             with c2:
-                name = st.text_input("성명", placeholder="예: 홍길동")
-                phone = st.text_input("연락처 (휴대폰)", placeholder="010-0000-0000")
+                dept = st.text_input("소속 부서 *", placeholder="예: 인사총무팀")
+                phone = st.text_input("휴대폰 번호 *", placeholder="010-0000-0000")
             
             v1365_id = st.text_input("1365 자원봉사포털 ID (선택 - 실적 연계용)", placeholder="1365 아이디 입력")
             
@@ -111,11 +129,18 @@ if menu == "봉사활동 신청 (직원용)":
 
             if submit:
                 selected_id = act_options[selected_act_label]
-                if not (dept and emp_id and name and phone):
-                    st.warning("필수 정보(부서, 사번, 성명, 연락처)를 모두 입력해주세요.")
+                if not (name.strip() and birthdate.strip() and dept.strip() and phone.strip()):
+                    st.warning("필수 정보(성명, 생년월일, 소속 부서, 휴대폰 번호)를 모두 입력해주세요.")
                 else:
+                    formatted_birth = format_birthdate(birthdate)
+                    clean_phone = phone.strip()
+                    
+                    # 중복 신청 체크 (동일 일감에 성명+생년월일 기준)
                     c = conn.cursor()
-                    c.execute("SELECT id FROM applications WHERE activity_id = ? AND emp_id = ?", (selected_id, emp_id))
+                    c.execute('''
+                        SELECT id FROM applications 
+                        WHERE activity_id = ? AND name = ? AND birthdate = ?
+                    ''', (selected_id, name.strip(), formatted_birth))
                     if c.fetchone():
                         st.error("이미 신청하신 봉사활동입니다.")
                     else:
@@ -129,15 +154,15 @@ if menu == "봉사활동 신청 (직원용)":
                         else:
                             now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                             c.execute('''
-                                INSERT INTO applications (activity_id, emp_id, name, dept, phone, v1365_id, applied_at)
+                                INSERT INTO applications (activity_id, name, birthdate, dept, phone, v1365_id, applied_at)
                                 VALUES (?, ?, ?, ?, ?, ?, ?)
-                            ''', (selected_id, emp_id, name, dept, phone, v1365_id, now_str))
+                            ''', (selected_id, name.strip(), formatted_birth, dept.strip(), clean_phone, v1365_id.strip(), now_str))
                             conn.commit()
-                            st.success(f"{name}님, 신청이 정상적으로 완료되었습니다!")
+                            st.success(f"{name}님, 신청이 정상적으로 완료되었습니다! (생년월일: {formatted_birth})")
                             st.balloons()
     conn.close()
 
-# --- 4. [직원용] 신청 내역 확인/취소 (이름 검색 + 동명이인 부서 구분) ---
+# --- 4. [직원용] 신청 내역 확인/취소 (이름 검색 + 동명이인 생년월일/부서 구분) ---
 elif menu == "신청 내역 확인/취소 (이름 검색)":
     st.title("🔍 내 신청 내역 조회")
     st.caption("이름을 입력하여 본인의 신청 내역을 확인하거나 취소할 수 있습니다.")
@@ -146,9 +171,8 @@ elif menu == "신청 내역 확인/취소 (이름 검색)":
     search_name = st.text_input("성명을 입력하세요", placeholder="예: 홍길동").strip()
     
     if search_name:
-        # 해당 이름을 가진 사용자 고유 목록 조회 (동명이인 확인용)
         user_query = '''
-            SELECT DISTINCT name, dept, emp_id, phone 
+            SELECT DISTINCT name, birthdate, dept, phone 
             FROM applications 
             WHERE name = ?
         '''
@@ -157,31 +181,33 @@ elif menu == "신청 내역 확인/취소 (이름 검색)":
         if users_df.empty:
             st.info(f"'{search_name}' 이름으로 신청된 내역이 없습니다.")
         else:
-            selected_emp_id = None
+            selected_birth = None
+            selected_phone = None
             
-            # 동명이인이 2명 이상 있는 경우 부서/사번으로 선택하게 함
+            # 동명이인이 2명 이상인 경우 부서/생년월일로 선택
             if len(users_df) > 1:
-                st.warning(f"동명이인이 {len(users_df)}명 존재합니다. 본인의 부서 정보를 선택해주세요.")
+                st.warning(f"동명이인이 {len(users_df)}명 조회되었습니다. 본인의 정보를 선택해주세요.")
                 options = {
-                    f"{row['name']} ({row['dept']} / 사번: {row['emp_id']} / 연락처 뒷자리: {row['phone'][-4:] if len(row['phone'])>=4 else row['phone']})": row['emp_id']
+                    f"{row['name']} ({row['dept']} / 생년월일: {row['birthdate']} / 연락처: {row['phone']})": (row['birthdate'], row['phone'])
                     for _, row in users_df.iterrows()
                 }
                 selected_user_label = st.selectbox("본인 정보 선택", list(options.keys()))
-                selected_emp_id = options[selected_user_label]
+                selected_birth, selected_phone = options[selected_user_label]
             else:
-                selected_emp_id = users_df.iloc[0]['emp_id']
-                st.write(f"👉 **확인된 정보:** {users_df.iloc[0]['name']} ({users_df.iloc[0]['dept']} / 사번: {users_df.iloc[0]['emp_id']})")
+                selected_birth = users_df.iloc[0]['birthdate']
+                selected_phone = users_df.iloc[0]['phone']
+                st.write(f"👉 **확인된 정보:** {users_df.iloc[0]['name']} ({users_df.iloc[0]['dept']} / 생년월일: {selected_birth} / 연락처: {selected_phone})")
 
-            # 선택된 사번의 신청 내역 조회
-            if selected_emp_id:
+            # 신청 내역 조회
+            if selected_birth:
                 query = '''
-                    SELECT a.id as app_id, act.title, act.date, act.location, act.hours, a.name, a.dept, a.applied_at
+                    SELECT a.id as app_id, act.title, act.date, act.location, act.hours, a.name, a.dept, a.birthdate, a.applied_at
                     FROM applications a
                     JOIN activities act ON a.activity_id = act.id
-                    WHERE a.emp_id = ?
+                    WHERE a.name = ? AND a.birthdate = ?
                     ORDER BY act.date DESC
                 '''
-                my_apps = pd.read_sql_query(query, conn, params=(selected_emp_id,))
+                my_apps = pd.read_sql_query(query, conn, params=(search_name, selected_birth))
                 
                 if my_apps.empty:
                     st.info("신청 내역이 없습니다.")
@@ -212,7 +238,7 @@ elif menu == "관리자 모드":
         tab1, tab2, tab3 = st.tabs(["일감 등록 및 관리", "신청자 관리 (조회/삭제/엑셀)", "신청자 수기 대리등록"])
         conn = get_db()
 
-        # [탭 1] 신규 일감 등록 및 삭제/상태변경
+        # [탭 1] 신규 일감 등록 및 목록 관리
         with tab1:
             st.subheader("➕ 신규 봉사 일감 등록")
             with st.form("add_activity_form", clear_on_submit=True):
@@ -269,7 +295,7 @@ elif menu == "관리자 모드":
                                 st.warning("일감 및 해당 신청 내역이 삭제되었습니다.")
                                 st.rerun()
 
-        # [탭 2] 신청자 명단 조회, 개별 삭제, 엑셀 다운로드
+        # [탭 2] 신청자 명단 관리 및 엑셀 다운로드
         with tab2:
             st.subheader("👥 신청자 명단 관리 및 엑셀 추출")
             acts = pd.read_sql_query("SELECT id, title, date FROM activities ORDER BY id DESC", conn)
@@ -281,9 +307,8 @@ elif menu == "관리자 모드":
                 target_act_name = st.selectbox("조회할 활동 선택", list(act_select_map.keys()), key="admin_view_act")
                 target_act_id = act_select_map[target_act_name]
 
-                # 신청자 쿼리
                 query = '''
-                    SELECT id AS '신청ID', emp_id AS '사번', name AS '성명', dept AS '부서', phone AS '연락처', 
+                    SELECT id AS '신청ID', name AS '성명', birthdate AS '생년월일', dept AS '소속부서', phone AS '휴대폰번호', 
                            v1365_id AS '1365 ID', applied_at AS '신청일시'
                     FROM applications
                     WHERE activity_id = ?
@@ -295,10 +320,8 @@ elif menu == "관리자 모드":
                 st.dataframe(app_df, use_container_width=True)
 
                 if not app_df.empty:
-                    # 엑셀 다운로드
                     output = io.BytesIO()
                     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                        # 엑셀 저장 시 신청ID 제외 깔끔하게 저장
                         excel_df = app_df.drop(columns=['신청ID'])
                         excel_df.to_excel(writer, index=False, sheet_name='신청자명단')
                     excel_data = output.getvalue()
@@ -306,7 +329,7 @@ elif menu == "관리자 모드":
                     st.download_button(
                         label="📥 1365 실적 등록/출석용 엑셀 다운로드",
                         data=excel_data,
-                        file_name=f"봉사활동_신청자명단_{target_act_id}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                        file_name=f"봉사활동_명단_{target_act_id}_{datetime.now().strftime('%Y%m%d')}.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         use_container_width=True
                     )
@@ -314,7 +337,7 @@ elif menu == "관리자 모드":
                     st.divider()
                     st.subheader("🗑️ 특정 신청자 취소/삭제")
                     del_options = {
-                        f"ID:{row['신청ID']} | {row['성명']} ({row['부서']} - 사번:{row['사번']})": row['신청ID']
+                        f"ID:{row['신청ID']} | {row['성명']} ({row['소속부서']} / 생년월일:{row['생년월일']})": row['신청ID']
                         for _, row in app_df.iterrows()
                     }
                     selected_del_label = st.selectbox("삭제할 신청자를 선택하세요", list(del_options.keys()))
@@ -327,10 +350,10 @@ elif menu == "관리자 모드":
                         st.success("해당 신청자가 성공적으로 취소/삭제되었습니다.")
                         st.rerun()
 
-        # [탭 3] 관리자가 대신 수기 신청 등록
+        # [탭 3] 관리자 수기 대리 등록
         with tab3:
             st.subheader("✍️ 신청자 수기 등록 (관리자 대리 신청)")
-            st.caption("현장 접수나 전화로 신청한 직원을 관리자가 직접 등록합니다.")
+            st.caption("현장 접수나 전화로 신청한 인원을 관리자가 직접 등록합니다.")
             
             acts = pd.read_sql_query("SELECT id, title, date FROM activities WHERE status = '모집중' ORDER BY id DESC", conn)
             if acts.empty:
@@ -341,31 +364,34 @@ elif menu == "관리자 모드":
                     sel_act = st.selectbox("봉사활동 선택", list(act_map.keys()))
                     col_m1, col_m2 = st.columns(2)
                     with col_m1:
-                        m_dept = st.text_input("소속 부서", placeholder="예: 행정복지팀")
-                        m_emp_id = st.text_input("사번", placeholder="예: 20230101")
+                        m_name = st.text_input("성명 *", placeholder="예: 김철수")
+                        m_birth = st.text_input("생년월일 (YYYY-MM-DD) *", placeholder="예: 1980-06-02")
                     with col_m2:
-                        m_name = st.text_input("성명", placeholder="예: 김철수")
-                        m_phone = st.text_input("연락처", placeholder="010-0000-0000")
+                        m_dept = st.text_input("소속 부서 *", placeholder="예: 인사총무팀")
+                        m_phone = st.text_input("휴대폰 번호 *", placeholder="010-0000-0000")
                     m_1365 = st.text_input("1365 ID (선택)", placeholder="1365 아이디")
                     
                     if st.form_submit_button("신청자 등록 완료", use_container_width=True):
-                        if m_dept and m_emp_id and m_name and m_phone:
+                        if m_name.strip() and m_birth.strip() and m_dept.strip() and m_phone.strip():
                             target_id = act_map[sel_act]
+                            formatted_m_birth = format_birthdate(m_birth)
                             c = conn.cursor()
-                            # 중복 검사
-                            c.execute("SELECT id FROM applications WHERE activity_id = ? AND emp_id = ?", (target_id, m_emp_id))
+                            c.execute('''
+                                SELECT id FROM applications 
+                                WHERE activity_id = ? AND name = ? AND birthdate = ?
+                            ''', (target_id, m_name.strip(), formatted_m_birth))
                             if c.fetchone():
-                                st.error("해당 사번으로 이미 신청되어 있습니다.")
+                                st.error("해당 인원은 이미 신청되어 있습니다.")
                             else:
                                 now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                                 c.execute('''
-                                    INSERT INTO applications (activity_id, emp_id, name, dept, phone, v1365_id, applied_at)
+                                    INSERT INTO applications (activity_id, name, birthdate, dept, phone, v1365_id, applied_at)
                                     VALUES (?, ?, ?, ?, ?, ?, ?)
-                                ''', (target_id, m_emp_id, m_name, m_dept, m_phone, m_1365, now_str))
+                                ''', (target_id, m_name.strip(), formatted_m_birth, m_dept.strip(), m_phone.strip(), m_1365.strip(), now_str))
                                 conn.commit()
-                                st.success(f"{m_name} 직원이 성공적으로 등록되었습니다.")
+                                st.success(f"{m_name} 님이 성공적으로 등록되었습니다. (생년월일: {formatted_m_birth})")
                                 st.rerun()
                         else:
-                            st.warning("필수 정보(부서, 사번, 성명, 연락처)를 모두 입력해주세요.")
+                            st.warning("필수 정보(성명, 생년월일, 소속 부서, 휴대폰 번호)를 모두 입력해주세요.")
 
         conn.close()
